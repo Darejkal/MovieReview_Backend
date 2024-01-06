@@ -1,0 +1,171 @@
+services:
+  test-producer:
+    build: 
+      context: ./backend
+      target: tester-producer
+    entrypoint: ['python','-u','/test/main.py']
+    volumes:
+      - ./backend/test:/test
+    env_file: env/dev.env
+    restart: on-failure
+    depends_on:
+      - producer
+  producer:
+    build: &producer-build 
+      context: ./backend
+      target: producer
+    volumes:
+      - ./backend/producer/main.py:/main.py
+    entrypoint: ['python','-u','-m','gunicorn', '--bind', '0.0.0.0:8000', 'main:app']
+    depends_on:
+      - redpanda
+      - kafka-admin
+    restart: always
+    env_file: env/dev.env
+  consumer:
+    build: 
+      context: ./backend
+      target: cosnumer
+    volumes:
+      - ./backend/consumer/main.py:/main.py
+    entrypoint: ['python','-u','/main.py']
+    depends_on:
+      - redpanda
+    restart: always
+    env_file: env/dev.env
+  kafka-admin:
+    build: *producer-build
+    volumes:
+      - ./backend/admin/main.py:/main.py
+    entrypoint: ['python','/main.py']
+    env_file: env/dev.env
+    depends_on:
+      - redpanda
+    restart: on-failure
+  redpanda:
+    image: docker.redpanda.com/vectorized/redpanda:v22.2.2
+    command:
+      - redpanda start
+      - --smp 1
+      - --overprovisioned
+      - --node-id 0
+      - --kafka-addr PLAINTEXT://0.0.0.0:9092,OUTSIDE://0.0.0.0:19092
+      - --advertise-kafka-addr PLAINTEXT://redpanda:9092,OUTSIDE://0.0.0.0:19092
+      - --pandaproxy-addr internal://0.0.0.0:8082,external://0.0.0.0:18082
+      - --advertise-pandaproxy-addr internal://redpanda:8082,external://0.0.0.0:18082
+      - --schema-registry-addr internal://0.0.0.0:8081,external://0.0.0.0:18081
+      - --rpc-addr redpanda:33145
+      - --advertise-rpc-addr redpanda:33145
+      - --mode dev-container
+      - --default-log-level=debug
+    ports:
+      - 18081:18081
+      - 18082:18082
+      - 19092:19092
+      - 19644:9644
+  console:
+    container_name: redpanda-console
+    image: docker.redpanda.com/redpandadata/console:v2.3.8
+    entrypoint: /bin/sh
+    command: -c 'echo "$$CONSOLE_CONFIG_FILE" > /tmp/config.yml; /app/console'
+    environment:
+      CONFIG_FILEPATH: /tmp/config.yml
+      CONSOLE_CONFIG_FILE: |
+        kafka:
+          brokers: ["redpanda:9092"]
+          schemaRegistry:
+            enabled: true
+            urls: ["http://redpanda:8081"]
+        redpanda:
+          adminApi:
+            enabled: true
+            urls: ["http://redpanda:9644"]
+    ports:
+      - 18083:8080
+    depends_on:
+      - redpanda
+  pyspark-client:
+    build: 
+      context: ./backend
+      target: spark-sbert2
+    ports:
+      - "4040:4040"
+    volumes:
+      - ./backend/pyspark-client/main.py:/main.py
+    entrypoint: bash -c "$${SPARK_HOME}/bin/spark-submit \
+      --deploy-mode client \
+      --jars local:///opt/spark/jars/spark-sql-kafka.jar,local:///opt/spark/jars/kafka-clients.jar,local:///opt/spark/jars/commons-pool.jar,local:///opt/spark/jars/spark-streaming-kafka.jar,local:///opt/spark/jars/spark-token-provider.jar\
+      /main.py"
+    depends_on:
+      - redpanda
+    env_file: env/dev.env
+    # restart: always
+  spark-master:
+    build:
+      context: ./backend
+      target: spark-sbert2
+    ports:
+      - "28080:8080"
+      - "7077:7077"
+    environment:
+      - SPARK_LOCAL_IP=spark-master
+      - SPARK_WORKLOAD=master
+    command: bash -c "$${SPARK_HOME}/bin/spark-class org.apache.spark.deploy.master.Master"
+    # depends_on:
+    # - redpanda
+    restart: always
+    env_file: env/dev.env
+  spark-worker-1:
+    build:
+      context: ./backend
+      target: spark-sbert2
+    ports:
+      - "28081:8081"
+    depends_on:
+      - spark-master
+    environment:
+      - SPARK_MASTER=spark://spark-master:7077
+      - SPARK_WORKER_CORES=1
+      - SPARK_WORKER_MEMORY=1G
+      - SPARK_DRIVER_MEMORY=1G
+      - SPARK_EXECUTOR_MEMORY=1G
+      - SPARK_WORKLOAD=worker
+      - SPARK_LOCAL_IP=spark-worker-1
+    command: bash -c "$${SPARK_HOME}/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077"
+    # networks:
+    # - sparknet
+  spark-worker-2:
+    build:
+      context: ./backend
+      target: spark-sbert2
+    ports:
+      - "28082:8081"
+    depends_on:
+      - spark-master
+    environment:
+      - SPARK_MASTER=spark://spark-master:7077
+      - SPARK_WORKER_CORES=1
+      - SPARK_WORKER_MEMORY=1G
+      - SPARK_DRIVER_MEMORY=1G
+      - SPARK_EXECUTOR_MEMORY=1G
+      - SPARK_WORKLOAD=worker
+      - SPARK_LOCAL_IP=spark-worker-2
+      
+    command: bash -c "$${SPARK_HOME}/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077"
+    # networks:
+    # - sparknet
+# networks:
+#   sparknet:
+  # demo-database:
+  #   image: postgres:11.7-alpine
+  #   ports: 
+  #     - "5432:5432"
+  #   environment: 
+  #     - POSTGRES_PASSWORD=casa1234
+  # consumer:
+  # model:
+  # hook:
+  # deploy:
+  # fluentd:
+  # elastic:
+  # postgres:
