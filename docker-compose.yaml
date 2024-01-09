@@ -25,14 +25,27 @@ services:
   consumer:
     build: 
       context: ./backend
-      target: cosnumer
+      target: producer
     volumes:
       - ./backend/consumer/main.py:/main.py
     entrypoint: ['python','-u','/main.py']
     depends_on:
       - redpanda
+      - postgres
     restart: always
     env_file: env/dev.env
+  # model-trainer:
+  #   build: 
+  #     context: ./backend
+  #     target: model-trainer
+  #   volumes:
+  #     - ./backend/model_trainer/main.py:/main.py
+  #     - ./model:/model
+  #   entrypoint: ['python','-u','/main.py']
+  #   depends_on:
+  #     - redpanda
+  #   restart: always
+  #   env_file: env/dev.env
   kafka-admin:
     build: *producer-build
     volumes:
@@ -84,6 +97,18 @@ services:
       - 18083:8080
     depends_on:
       - redpanda
+  postgres:
+    image: postgres:16.1-alpine
+    env_file:
+    - ./env/dev.env
+    # volumes:
+    # - pgdata:/var/lib/postgresql/data
+    restart: on-failure
+  adminer:
+    image: adminer
+    restart: always
+    ports:
+      - 38080:8080
   pyspark-client:
     build: 
       context: ./backend
@@ -92,9 +117,11 @@ services:
       - "4040:4040"
     volumes:
       - ./backend/pyspark-client/main.py:/main.py
+      - ./model:/model
     entrypoint: bash -c "$${SPARK_HOME}/bin/spark-submit \
       --deploy-mode client \
-      --jars local:///opt/spark/jars/spark-sql-kafka.jar,local:///opt/spark/jars/kafka-clients.jar,local:///opt/spark/jars/commons-pool.jar,local:///opt/spark/jars/spark-streaming-kafka.jar,local:///opt/spark/jars/spark-token-provider.jar\
+      --driver-class-path local:///opt/spark/jars/postgresql.jar\
+      --jars local:///opt/spark/jars/spark-sql-kafka.jar,local:///opt/spark/jars/kafka-clients.jar,local:///opt/spark/jars/commons-pool.jar,local:///opt/spark/jars/spark-streaming-kafka.jar,local:///opt/spark/jars/spark-token-provider.jar,local:///opt/spark/jars/postgresql.jar\
       /main.py"
     depends_on:
       - redpanda
@@ -111,8 +138,6 @@ services:
       - SPARK_LOCAL_IP=spark-master
       - SPARK_WORKLOAD=master
     command: bash -c "$${SPARK_HOME}/bin/spark-class org.apache.spark.deploy.master.Master"
-    # depends_on:
-    # - redpanda
     restart: always
     env_file: env/dev.env
   spark-worker-1:
@@ -132,8 +157,6 @@ services:
       - SPARK_WORKLOAD=worker
       - SPARK_LOCAL_IP=spark-worker-1
     command: bash -c "$${SPARK_HOME}/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077"
-    # networks:
-    # - sparknet
   spark-worker-2:
     build:
       context: ./backend
@@ -150,12 +173,51 @@ services:
       - SPARK_EXECUTOR_MEMORY=1G
       - SPARK_WORKLOAD=worker
       - SPARK_LOCAL_IP=spark-worker-2
-      
+
     command: bash -c "$${SPARK_HOME}/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077"
-    # networks:
-    # - sparknet
-# networks:
-#   sparknet:
+  frontend:
+    build: 
+      context: ./frontend
+    volumes:
+      - ./frontend/flask:/flask
+    entrypoint: ['python','-u','/flask/main.py']
+    depends_on:
+      - redpanda
+      - kafka-admin
+    ports:
+    - "5000:5000"
+    restart: always
+    env_file: env/dev.env
+  namenode:
+    image: apache/hadoop:3
+    hostname: namenode
+    command: ["hdfs", "namenode"]
+    ports:
+      - 9870:9870
+    env_file:
+      - ./env/hadoop.env
+    environment:
+        ENSURE_NAMENODE_DIR: "/tmp/hadoop-root/dfs/name"
+  datanode:
+    image: apache/hadoop:3
+    command: ["hdfs", "datanode"]
+    env_file:
+      - ./env/hadoop.env      
+  resourcemanager:
+    image: apache/hadoop:3
+    hostname: resourcemanager
+    command: ["yarn", "resourcemanager"]
+    ports:
+        - 8088:8088
+    env_file:
+      - ./env/hadoop.env
+    volumes:
+      - ./test.sh:/opt/test.sh
+  nodemanager:
+    image: apache/hadoop:3
+    command: ["yarn", "nodemanager"]
+    env_file:
+      - ./env/hadoop.env
   # demo-database:
   #   image: postgres:11.7-alpine
   #   ports: 

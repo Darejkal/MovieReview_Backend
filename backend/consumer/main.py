@@ -1,41 +1,67 @@
 from kafka import KafkaConsumer
-from sentence_transformers import SentenceTransformer,datasets,losses
+import psycopg2
 import os
-from typing import List
 import json
-import torch
+from typing import Dict,List
 KAFKA_ADDRESS=os.environ['REDPANDA_ADDR']
-SAMPLE_SIZE=300
-consumer=KafkaConsumer(topics='review',bootstrap_servers=KAFKA_ADDRESS)
+SAMPLE_SIZE=1
+# we use a context manager to scope the cursor session
+def parseItem(item:bytes):
+    obj:Dict=json.loads(item)
+    return(obj.get("critic",None),obj.get("publication",None),obj.get("state",None),obj.get("review",None),obj.get("date",None),obj.get("grade",None),obj.get("movie",None))
 items=[]
-try:
-    model=SentenceTransformer("/model/latest.pth")
-except:
-    model = SentenceTransformer("all-MiniLM-L6-v2")
-def parseBatch(batch:List):
-    new_batch=[]
-    for x in batch:
-        try:
-            new_x=json.load(x.get("value"))
-            if new_x:
-                new_batch.append((new_x,x.get("movie")))
-        except:
-            pass
-    return new_batch
-def onBatchSize(batch:List):
-    print(parseBatch(batch))
-    train_dataloader=datasets.NoDuplicatesDataLoader(parseBatch(batch),batch_size=8)
-    train_loss = losses.MultipleNegativesRankingLoss(model)
-    num_epochs = 3
-    warmup_steps = int(len(train_dataloader) * num_epochs * 0.1)
-    model.fit(train_objectives=[(train_dataloader, train_loss)], epochs=num_epochs, warmup_steps=warmup_steps, show_progress_bar=True)
-    os.makedirs('/model', exist_ok=True)
-    model.save('/model/lastest.pth')
+consumer=KafkaConsumer('review',bootstrap_servers=KAFKA_ADDRESS)
+def onBatchSize(curs,batch:List[Dict]):
+    parsed_batch=[]
+    for item in batch:
+        parsed_batch.append((
+            item.get('critic',None),
+            item.get('publication',None),
+            item.get('state',None),
+            item.get('review',None),
+            item.get('date',None),
+            item.get('grade',None),
+            item.get('movie',None),
+        ))
+    query="INSERT INTO review_data (critic,publication,state,review,date,grade,movie) VALUES %s;"
+    try:
+        curs.execute(query,parsed_batch)
+    except (Exception, psycopg2.DatabaseError) as error:
+        print("Error",error)
+conn=None
 while True:
-    new_items=consumer.poll(timeout_ms=1000)["review"]
-    if new_items:
-        items.extend(new_items)
-    if len(items)>SAMPLE_SIZE:
-        onBatchSize(items[:SAMPLE_SIZE])
-        items=items[SAMPLE_SIZE:]
+    try:
+        conn = psycopg2.connect(
+            dbname=os.environ["POSTGRES_DB"], user=os.environ["POSTGRES_USER"], password=os.environ["POSTGRES_PASSWORD"],host="postgres",port="5432"
+        )
+        print(conn.info)
+        break
+    except:
+        print("Unable to connect to the database")
+with conn.cursor() as curs:
+    curs.execute("""
+        CREATE TABLE IF NOT EXISTS review_data (
+            id serial primary key,
+            critic text,
+            publication text,
+            state text,
+            review text,
+            date text,
+            grade text,
+            movie text  
+        );
+    """)
+    conn.commit()
+    while True:
+        new_items=consumer.poll(timeout_ms=1000)
+        for _,v in new_items.items():
+            try:
+                items.extend([json.loads(item.value) for item in v])
+            except:
+                pass
+        if len(items)>SAMPLE_SIZE:
+            onBatchSize(curs,items[:SAMPLE_SIZE])
+            conn.commit()
+            print("New batch commited")
+            items=items[SAMPLE_SIZE:] 
 

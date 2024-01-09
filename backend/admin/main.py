@@ -9,7 +9,7 @@ except:
     KAFKA_RETENTION_BYTE=None
 admin=KafkaAdminClient(bootstrap_servers=KAFKA_ADDRESS)
 new_topics=[]
-for topic in ['review','review-processed']:
+for topic in ['review','inference-input','inference-output']:
     if topic not in admin.list_topics():
             print(topic)
             new_topics.append(NewTopic(name=topic, num_partitions=1, replication_factor=1,topic_configs={'retention.bytes': KAFKA_RETENTION_BYTE}))
